@@ -336,7 +336,7 @@ public class DialogStoriesCell extends FrameLayout implements NotificationCenter
         telegramLogoView = new ImageView(context);
         telegramLogoView.setContentDescription(getString(R.string.AppName));
         telegramLogoView.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        telegramLogoView.setImageResource(R.drawable.telegram_logo_2);
+        telegramLogoView.setImageDrawable(mmtgWordmark(context));
         telegramLogoView.setColorFilter(getTextLogoColor(), PorterDuff.Mode.MULTIPLY);
         telegramLogoView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         telegramLogoView.setFocusableInTouchMode(true);
@@ -2244,5 +2244,22 @@ public class DialogStoriesCell extends FrameLayout implements NotificationCenter
             subtitleOverlayContainer.setAlpha(progress);
             subtitleOverlayContainer.setVisibility(progress > 0 ? VISIBLE : GONE);
         }
+    }
+
+    /** Text wordmark for the app name, drawn white so the theme colour filter can tint it. */
+    private static android.graphics.drawable.Drawable mmtgWordmark(Context context) {
+        android.text.TextPaint p = new android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0xffffffff);
+        p.setTypeface(AndroidUtilities.bold());
+        p.setTextSize(dp(20));
+        String text = getString(R.string.AppName);
+        int w = (int) Math.ceil(p.measureText(text));
+        android.graphics.Paint.FontMetricsInt fm = p.getFontMetricsInt();
+        int h = fm.descent - fm.ascent;
+        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(Math.max(1, w), Math.max(1, h), android.graphics.Bitmap.Config.ARGB_8888);
+        new android.graphics.Canvas(b).drawText(text, 0, -fm.ascent, p);
+        android.graphics.drawable.BitmapDrawable d = new android.graphics.drawable.BitmapDrawable(context.getResources(), b);
+        d.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        return d;
     }
 }

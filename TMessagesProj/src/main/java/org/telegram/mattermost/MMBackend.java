@@ -278,6 +278,19 @@ public class MMBackend {
             return getDialogs((TLRPC.TL_messages_getDialogs) req);
         } else if (req instanceof TLRPC.TL_messages_getPinnedDialogs) {
             TLRPC.TL_messages_peerDialogs r = new TLRPC.TL_messages_peerDialogs();
+            if (((TLRPC.TL_messages_getPinnedDialogs) req).folder_id == 0) {
+                ArrayList<JSONObject> fav = new ArrayList<>();
+                for (JSONObject c : loadMyChannels()) {
+                    if (favorites.contains(c.optString("id"))) {
+                        fav.add(c);
+                    }
+                }
+                DialogBundle b = buildDialogs(fav);
+                r.dialogs = b.dialogs;
+                r.messages = b.messages;
+                r.chats = b.chats;
+                r.users = b.users;
+            }
             r.state = new TLRPC.TL_updates_state();
             r.state.pts = currentGlobalPts();
             r.state.date = now();
@@ -370,6 +383,40 @@ public class MMBackend {
             TLRPC.TL_messages_dialogFilters r = new TLRPC.TL_messages_dialogFilters();
             return r;
         } else if (req instanceof org.telegram.tgnet.tl.TL_account.updateStatus || req instanceof TLRPC.TL_messages_reorderPinnedDialogs) {
+            return new TLRPC.TL_boolTrue();        } else if (req instanceof TLRPC.TL_messages_createChat) {
+            TLRPC.TL_messages_createChat r = (TLRPC.TL_messages_createChat) req;
+            TLRPC.TL_messages_invitedUsers res = new TLRPC.TL_messages_invitedUsers();
+            res.updates = createGroup(r.title, r.users);
+            return res;
+        } else if (req instanceof TLRPC.TL_channels_createChannel) {
+            return createGroup(((TLRPC.TL_channels_createChannel) req).title, new ArrayList<>());
+        } else if (req instanceof TLRPC.TL_messages_getFeaturedStickers || req instanceof TLRPC.TL_messages_getFeaturedEmojiStickers) {
+            return new TLRPC.TL_messages_featuredStickers();
+        } else if (req instanceof TLRPC.TL_messages_getArchivedStickers) {
+            return new TLRPC.TL_messages_archivedStickers();
+        } else if (req instanceof TLRPC.TL_messages_getEmojiStickers || req instanceof TLRPC.TL_messages_getAllStickers || req instanceof TLRPC.TL_messages_getMaskStickers) {
+            return new TLRPC.TL_messages_allStickers();
+        } else if (req instanceof TLRPC.TL_messages_getStickers) {
+            return new TLRPC.TL_messages_stickers();
+        } else if (req instanceof TLRPC.TL_messages_getFavedStickers) {
+            return new TLRPC.TL_messages_favedStickers();
+        } else if (req instanceof TLRPC.TL_messages_getRecentStickers) {
+            return new TLRPC.TL_messages_recentStickers();
+        } else if (req instanceof TLRPC.TL_messages_getAvailableReactions) {
+            return new TLRPC.TL_messages_availableReactions();
+        } else if (req instanceof TLRPC.TL_messages_getTopReactions || req instanceof TLRPC.TL_messages_getRecentReactions) {
+            return new TLRPC.TL_messages_reactions();
+        } else if (req instanceof TLRPC.TL_messages_getStickerSet) {
+            // No Telegram sticker sets on Mattermost: answer with an empty set so the UI stops retrying.
+            TLRPC.InputStickerSet in = ((TLRPC.TL_messages_getStickerSet) req).stickerset;
+            TLRPC.TL_messages_stickerSet r = new TLRPC.TL_messages_stickerSet();
+            r.set = new TLRPC.TL_stickerSet();
+            r.set.id = in == null ? 0 : in.id;
+            r.set.access_hash = in == null ? 0 : in.access_hash;
+            r.set.short_name = in != null && in.short_name != null ? in.short_name : "";
+            r.set.title = "";
+            return r;
+        } else if (req instanceof TLRPC.TL_messages_getAllDrafts || req instanceof TLRPC.TL_messages_reportReadMetrics) {
             return new TLRPC.TL_boolTrue();
         }
         String name = req.getClass().getSimpleName();
@@ -668,7 +715,8 @@ public class MMBackend {
         ch.megagroup = true;
         ch.date = (int) (c.optLong("create_at") / 1000);
         ch.photo = new TLRPC.TL_chatPhotoEmpty();
-        ch.access_hash = 0;
+        // Telegram code ignores channels with access_hash == 0; any stable non-zero value works here.
+        ch.access_hash = ch.id ^ 0x6d6d74674cL;
         ch.flags |= TLObject.FLAG_13;
         ch.left = false;
         ch.creator = config.userId.equals(c.optString("creator_id"));
@@ -1110,6 +1158,49 @@ public class MMBackend {
         r.users = b.users;
         r.count = b.dialogs.size();
         return r;
+    }
+
+    private TLRPC.TL_updates createGroup(String title, ArrayList<TLRPC.InputUser> invite) throws Exception {
+        if (config.teamId == null) {
+            throw new MMApi.MMException(400, "No team to create the channel in", null);
+        }
+        String slug = title == null ? "" : title.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("^-+|-+$", "");
+        if (slug.length() > 40) {
+            slug = slug.substring(0, 40);
+        }
+        String suffix = Long.toString(System.currentTimeMillis() % 1_000_000_000L, 36);
+        slug = (slug.isEmpty() ? "group" : slug) + "-" + suffix;
+        JSONObject body = new JSONObject();
+        body.put("team_id", config.teamId);
+        body.put("name", slug);
+        body.put("display_name", title == null || title.isEmpty() ? slug : title);
+        body.put("type", "P");
+        JSONObject ch = (JSONObject) api.post("/channels", body);
+        String chId = ch.getString("id");
+        for (TLRPC.InputUser iu : invite) {
+            String uid = mmUserFromInput(iu);
+            if (uid == null || uid.equals(config.userId)) {
+                continue;
+            }
+            try {
+                JSONObject m = new JSONObject();
+                m.put("user_id", uid);
+                api.post("/channels/" + chId + "/members", m);
+            } catch (Exception e) {
+                FileLog.e("mm add member failed: " + e);
+            }
+        }
+        ch = api.getObject("/channels/" + chId);
+        putChannel(ch);
+        try {
+            members.put(chId, api.getObject("/channels/" + chId + "/members/me"));
+        } catch (Exception ignore) {
+        }
+        TLRPC.TL_updates u = new TLRPC.TL_updates();
+        u.chats.add(toChat(ch));
+        u.users.add(toUser(users.get(config.userId)));
+        u.date = now();
+        return u;
     }
 
     private TLObject getPeerDialogs(TLRPC.TL_messages_getPeerDialogs req) throws Exception {
@@ -1920,6 +2011,9 @@ public class MMBackend {
     }
 
     private synchronized void connectWs() {
+        if (ws != null && (ws.isOpen() || ws.getState() == com.neovisionaries.ws.client.WebSocketState.CONNECTING)) {
+            return;
+        }
         try {
             setState(ConnectionsManager.ConnectionStateConnecting);
             String url = api.getServer().replaceFirst("^http", "ws") + "/api/v4/websocket";
@@ -1930,6 +2024,7 @@ public class MMBackend {
                 @Override
                 public void onConnected(WebSocket websocket, Map<String, List<String>> headers) {
                     wsBackoff = 1;
+                    FileLog.d("mm ws connected");
                     setState(ConnectionsManager.ConnectionStateConnected);
                     // catch up on anything missed while disconnected
                     Utilities.stageQueue.postRunnable(() -> AccountInstance.getInstance(account).getMessagesController().getDifference());
@@ -1948,6 +2043,7 @@ public class MMBackend {
 
                 @Override
                 public void onDisconnected(WebSocket websocket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer) {
+                    FileLog.d("mm ws disconnected byServer=" + closedByServer + " " + serverCloseFrame);
                     scheduleReconnect();
                 }
 
@@ -2028,6 +2124,7 @@ public class MMBackend {
         if (event.isEmpty() || data == null) {
             return;
         }
+        FileLog.d("mm ws event " + event);
         switch (event) {
             case "posted": {
                 JSONObject post = new JSONObject(data.getString("post"));
