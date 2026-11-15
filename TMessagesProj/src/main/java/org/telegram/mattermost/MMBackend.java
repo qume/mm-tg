@@ -266,14 +266,7 @@ public class MMBackend {
         } else if (req instanceof TLRPC.TL_updates_getDifference) {
             return getDifference((TLRPC.TL_updates_getDifference) req);
         } else if (req instanceof TLRPC.TL_updates_getChannelDifference) {
-            TLRPC.TL_updates_getChannelDifference r = (TLRPC.TL_updates_getChannelDifference) req;
-            TLRPC.TL_updates_channelDifferenceEmpty d = new TLRPC.TL_updates_channelDifferenceEmpty();
-            d.flags |= 1;
-            d.isFinal = true;
-            d.pts = Math.max(r.pts, channelPts(r.channel.channel_id));
-            setChannelPts(r.channel.channel_id, d.pts);
-            d.timeout = 60;
-            return d;
+            return getChannelDifference((TLRPC.TL_updates_getChannelDifference) req);
         } else if (req instanceof TLRPC.TL_messages_getDialogs) {
             return getDialogs((TLRPC.TL_messages_getDialogs) req);
         } else if (req instanceof TLRPC.TL_messages_getPinnedDialogs) {
@@ -521,8 +514,14 @@ public class MMBackend {
 
     private int nextChannelPts(long chatId, int count) {
         synchronized (ptsLock) {
-            int p = channelPts(chatId) + count;
+            int start = channelPts(chatId);
+            int p = start + count;
             setChannelPts(chatId, p);
+            // remember when each pts was handed out, so getChannelDifference can refetch what the client missed
+            String ts = String.valueOf(System.currentTimeMillis());
+            for (int i = start + 1; i <= p; i++) {
+                ids().putKv("cptsts_" + chatId + "_" + i, ts);
+            }
             return p;
         }
     }
@@ -1945,6 +1944,81 @@ public class MMBackend {
     // ------------------------------------------------------------------------------------
     // getDifference: catch up on everything since the client's last known date
     // ------------------------------------------------------------------------------------
+
+    private TLObject getChannelDifference(TLRPC.TL_updates_getChannelDifference r) throws Exception {
+        long chatId = r.channel.channel_id;
+        int serverPts = channelPts(chatId);
+        String chId = ids().mm(chatId);
+        if (r.pts >= serverPts || chId == null) {
+            TLRPC.TL_updates_channelDifferenceEmpty d = new TLRPC.TL_updates_channelDifferenceEmpty();
+            d.flags |= 1 | 2;
+            d.isFinal = true;
+            d.pts = Math.max(r.pts, serverPts);
+            setChannelPts(chatId, d.pts);
+            d.timeout = 60;
+            return d;
+        }
+        String tsStr = ids().getKv("cptsts_" + chatId + "_" + (r.pts + 1));
+        long since = tsStr != null ? Long.parseLong(tsStr) - 30_000L : System.currentTimeMillis() - 6 * 3600_000L;
+        JSONObject c = channel(chId);
+        JSONObject res = api.getObject("/channels/" + chId + "/posts?since=" + since);
+        JSONObject posts = res.optJSONObject("posts");
+        JSONArray order = res.optJSONArray("order");
+        ArrayList<JSONObject> list = new ArrayList<>();
+        if (posts != null && order != null) {
+            for (int i = 0; i < order.length(); i++) {
+                JSONObject p = posts.optJSONObject(order.getString(i));
+                if (p != null && chId.equals(p.optString("channel_id"))) {
+                    list.add(p);
+                }
+            }
+        }
+        Collections.sort(list, (a, b) -> Long.compare(a.optLong("create_at"), b.optLong("create_at")));
+        HashSet<String> need = new HashSet<>();
+        for (JSONObject p : list) {
+            need.add(p.optString("user_id"));
+        }
+        ensureUsers(need);
+        long did = -chatId;
+        TLRPC.TL_updates_channelDifference d = new TLRPC.TL_updates_channelDifference();
+        d.flags |= 1 | 2;
+        d.isFinal = true;
+        d.timeout = 60;
+        for (JSONObject p : list) {
+            if (p.optLong("delete_at", 0) > 0) {
+                int mid = ids().existingMid(p.optString("id"));
+                if (mid != 0) {
+                    TL_update.TL_updateDeleteChannelMessages u = new TL_update.TL_updateDeleteChannelMessages();
+                    u.channel_id = chatId;
+                    u.messages.add(mid);
+                    u.pts = serverPts;
+                    u.pts_count = 0;
+                    d.other_updates.add(u);
+                }
+                continue;
+            }
+            TLRPC.Message m = toMessage(p, c, posts);
+            if (p.optLong("create_at", 0) >= since) {
+                m.unread = !m.out;
+                d.new_messages.add(m);
+            } else {
+                TL_update.TL_updateEditChannelMessage e = new TL_update.TL_updateEditChannelMessage();
+                e.message = m;
+                e.pts = serverPts;
+                e.pts_count = 0;
+                d.other_updates.add(e);
+            }
+        }
+        d.pts = serverPts;
+        d.chats.add(toChat(c));
+        for (String uid : need) {
+            JSONObject u = users.get(uid);
+            if (u != null) {
+                d.users.add(toUser(u));
+            }
+        }
+        return d;
+    }
 
     private TLObject getDifference(TLRPC.TL_updates_getDifference req) throws Exception {
         long since = Math.max(0, (long) req.date * 1000L - 60_000L);
