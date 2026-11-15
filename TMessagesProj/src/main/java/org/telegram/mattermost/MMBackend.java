@@ -209,7 +209,7 @@ public class MMBackend {
             try {
                 res = dispatch(req);
                 if (res == null) {
-                    err = error(400, "MM_UNSUPPORTED");
+                    err = error(406, "MM_UNSUPPORTED"); // 406 is never shown to the user
                 }
             } catch (MMApi.MMException e) {
                 FileLog.e("mm request " + req + " failed: " + e.status + " " + e.getMessage());
@@ -416,6 +416,67 @@ public class MMBackend {
             r.set.short_name = in != null && in.short_name != null ? in.short_name : "";
             r.set.title = "";
             return r;
+        } else if (req instanceof TLRPC.TL_channels_getParticipant) {
+            TLRPC.TL_channels_getParticipant r = (TLRPC.TL_channels_getParticipant) req;
+            String chId = ids().mm(r.channel.channel_id);
+            String uid = r.participant instanceof TLRPC.TL_inputPeerSelf ? config.userId : ids().mm(r.participant.user_id);
+            if (chId == null || uid == null) {
+                throw new MMApi.MMException(400, "USER_NOT_PARTICIPANT", null);
+            }
+            JSONObject mem;
+            try {
+                mem = api.getObject("/channels/" + chId + "/members/" + uid);
+            } catch (MMApi.MMException e) {
+                throw new MMApi.MMException(400, "USER_NOT_PARTICIPANT", null);
+            }
+            JSONObject ch = channel(chId);
+            TLRPC.ChannelParticipant cp;
+            if (ch != null && uid.equals(ch.optString("creator_id"))) {
+                cp = new TLRPC.TL_channelParticipantCreator();
+            } else if (uid.equals(config.userId)) {
+                cp = new TLRPC.TL_channelParticipantSelf();
+            } else {
+                cp = new TLRPC.TL_channelParticipant();
+            }
+            TLRPC.TL_peerUser pu = new TLRPC.TL_peerUser();
+            pu.user_id = ids().userId(uid);
+            cp.peer = pu;
+            cp.user_id = pu.user_id;
+            cp.date = (int) (mem.optLong("last_update_at", 0) / 1000);
+            TLRPC.TL_channels_channelParticipant res = new TLRPC.TL_channels_channelParticipant();
+            res.participant = cp;
+            HashSet<String> need = new HashSet<>();
+            need.add(uid);
+            ensureUsers(need);
+            JSONObject u = users.get(uid);
+            if (u != null) {
+                res.users.add(toUser(u));
+            }
+            if (ch != null) {
+                res.chats.add(toChat(ch));
+            }
+            return res;
+        } else if (req instanceof TLRPC.TL_messages_search || req instanceof TLRPC.TL_messages_getScheduledHistory
+                || req instanceof TLRPC.TL_messages_getSavedHistory || req instanceof TLRPC.TL_messages_searchGlobal) {
+            return new TLRPC.TL_messages_messages();
+        } else if (req instanceof TLRPC.TL_messages_getSearchCounters) {
+            return new org.telegram.tgnet.Vector<TLRPC.TL_messages_searchCounter>(TLRPC.TL_messages_searchCounter::TLdeserialize);
+        } else if (req instanceof TLRPC.TL_messages_getSavedDialogs) {
+            return new TLRPC.TL_messages_savedDialogs();
+        } else if (req instanceof TLRPC.TL_messages_getSponsoredMessages) {
+            return new TLRPC.TL_messages_sponsoredMessagesEmpty();
+        } else if (req instanceof TLRPC.TL_messages_getSavedGifs) {
+            return new TLRPC.TL_messages_savedGifs();
+        } else if (req instanceof TLRPC.TL_contacts_getTopPeers) {
+            return new TLRPC.TL_contacts_topPeersDisabled();
+        } else if (req instanceof TLRPC.TL_messages_getAttachMenuBots) {
+            return new TLRPC.TL_attachMenuBotsNotModified();
+        } else if (req instanceof TLRPC.TL_messages_getMessagesReactions) {
+            TLRPC.TL_updates u = new TLRPC.TL_updates();
+            u.date = now();
+            return u;
+        } else if (req instanceof TLRPC.TL_messages_getOnlines) {
+            return new TLRPC.TL_chatOnlines();
         } else if (req instanceof TLRPC.TL_messages_getAllDrafts || req instanceof TLRPC.TL_messages_reportReadMetrics) {
             return new TLRPC.TL_boolTrue();
         }
@@ -720,6 +781,9 @@ public class MMBackend {
         ch.flags |= TLObject.FLAG_13;
         ch.left = false;
         ch.creator = config.userId.equals(c.optString("creator_id"));
+        // Without default rights Telegram treats every non-creator as banned from writing.
+        ch.default_banned_rights = new TLRPC.TL_chatBannedRights();
+        ch.flags |= TLObject.FLAG_18;
         long mc = c.optLong("member_count", 0);
         if (mc > 0) {
             ch.participants_count = (int) mc;
@@ -850,6 +914,14 @@ public class MMBackend {
         return m;
     }
 
+    /** Telegram names cached files "volume_local.jpg"; an unavailable location means "never download". */
+    private static TLRPC.FileLocation fileLocation(long fileNid, int localId) {
+        TLRPC.TL_fileLocationToBeDeprecated l = new TLRPC.TL_fileLocationToBeDeprecated();
+        l.volume_id = fileNid;
+        l.local_id = localId;
+        return l;
+    }
+
     private TLRPC.MessageMedia toMedia(JSONObject f, long date) {
         String id = f.optString("id");
         fileInfos.put(id, f);
@@ -871,7 +943,7 @@ public class MMBackend {
             small.w = Math.max(1, (int) (w * Math.min(1f, ts)));
             small.h = Math.max(1, (int) (h * Math.min(1f, ts)));
             small.size = 0;
-            small.location = new TLRPC.TL_fileLocationUnavailable();
+            small.location = fileLocation(photo.id, 1);
             photo.sizes.add(small);
             TLRPC.TL_photoSize big = new TLRPC.TL_photoSize();
             if (w > 1920 || h > 1080) {
@@ -886,7 +958,7 @@ public class MMBackend {
                 big.h = h;
                 big.size = (int) size;
             }
-            big.location = new TLRPC.TL_fileLocationUnavailable();
+            big.location = fileLocation(photo.id, 2);
             photo.sizes.add(big);
             TLRPC.TL_messageMediaPhoto mp = new TLRPC.TL_messageMediaPhoto();
             mp.photo = photo;
@@ -917,7 +989,7 @@ public class MMBackend {
             th.w = Math.max(1, (int) (w * ts));
             th.h = Math.max(1, (int) (h * ts));
             th.size = 0;
-            th.location = new TLRPC.TL_fileLocationUnavailable();
+            th.location = fileLocation(doc.id, 3);
             doc.thumbs.add(th);
             doc.flags |= TLObject.FLAG_0;
         }
