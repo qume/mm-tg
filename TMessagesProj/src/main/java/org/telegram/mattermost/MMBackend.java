@@ -1680,6 +1680,14 @@ public class MMBackend {
         if (chId == null) {
             return;
         }
+        if (ApplicationLoader.mainInterfacePaused) {
+            // Never mark Mattermost channels read while the app is in the background: that would clear
+            // unread badges (and notifications) on the user's other Mattermost clients.
+            FileLog.d("mm markViewed skipped (app in background) " + chId);
+            return;
+        }
+        JSONObject cached = channels.get(chId);
+        FileLog.d("mm markViewed " + chId + " " + (cached != null ? channelTitle(cached) : ""));
         try {
             JSONObject body = new JSONObject();
             body.put("channel_id", chId);
