@@ -877,17 +877,10 @@ public class MMBackend {
                 JSONObject f = files.getJSONObject(0);
                 m.media = toMedia(f, post.optLong("create_at"));
                 m.flags |= TLObject.FLAG_9;
-                if (files.length() > 1) {
-                    StringBuilder extra = new StringBuilder(m.message);
-                    for (int i = 1; i < files.length(); i++) {
-                        JSONObject ef = files.getJSONObject(i);
-                        fileInfos.put(ef.optString("id"), ef);
-                        if (extra.length() > 0) {
-                            extra.append('\n');
-                        }
-                        extra.append("📎 ").append(ef.optString("name"));
-                    }
-                    m.message = extra.toString();
+                long group = albumGroup(post, files, 0);
+                if (group != 0) {
+                    m.grouped_id = group;
+                    m.flags |= TLObject.FLAG_17;
                 }
             }
             if (post.optLong("edit_at", 0) > 0) {
@@ -911,6 +904,84 @@ public class MMBackend {
             m.message = "";
         }
         return m;
+    }
+
+    /**
+     * A post with several files becomes several messages: the post itself (text + first file)
+     * followed by one message per extra file. Extras are grouped into an album with the post
+     * when all files are of the same kind (Telegram can't mix photos and documents in one album).
+     */
+    private ArrayList<TLRPC.Message> toMessages(JSONObject post, JSONObject channel, JSONObject batch) throws Exception {
+        ArrayList<TLRPC.Message> r = new ArrayList<>();
+        TLRPC.Message first = toMessage(post, channel, batch);
+        r.add(first);
+        if (first instanceof TLRPC.TL_messageService) {
+            return r;
+        }
+        JSONObject meta = post.optJSONObject("metadata");
+        JSONArray files = meta != null ? meta.optJSONArray("files") : null;
+        if (files == null || files.length() < 2) {
+            return r;
+        }
+        long did = dialogId(channel);
+        String postId = post.optString("id");
+        for (int i = 1; i < files.length(); i++) {
+            TLRPC.TL_message m = new TLRPC.TL_message();
+            m.message = "";
+            m.media = toMedia(files.getJSONObject(i), post.optLong("create_at"));
+            m.flags |= TLObject.FLAG_9;
+            long group = albumGroup(post, files, i);
+            if (group != 0) {
+                m.grouped_id = group;
+                m.flags |= TLObject.FLAG_17;
+            }
+            m.id = ids().mid(did, postId + "#" + i, post.optLong("create_at"));
+            m.local_id = m.id;
+            m.date = first.date;
+            m.peer_id = first.peer_id;
+            m.dialog_id = did;
+            m.from_id = first.from_id;
+            m.flags |= TLObject.FLAG_8;
+            m.out = first.out;
+            m.unread = false;
+            m.edit_date = first.edit_date;
+            if (first.edit_date != 0) {
+                m.flags |= TLObject.FLAG_15;
+            }
+            if (first.reply_to != null) {
+                m.reply_to = first.reply_to;
+                m.flags |= TLObject.FLAG_3;
+            }
+            r.add(m);
+        }
+        return r;
+    }
+
+    /** Album id for file #index of a post, or 0 when the files shouldn't be grouped. Albums hold at most 10 items. */
+    private long albumGroup(JSONObject post, JSONArray files, int index) {
+        if (files.length() < 2) {
+            return 0;
+        }
+        boolean firstVisual = isVisual(files.optJSONObject(0));
+        for (int i = 1; i < files.length(); i++) {
+            if (isVisual(files.optJSONObject(i)) != firstVisual) {
+                return 0;
+            }
+        }
+        return ids().fileId(post.optString("id")) * 16 + index / 10 + 1;
+    }
+
+    private static boolean isVisual(JSONObject f) {
+        if (f == null) {
+            return false;
+        }
+        String mime = f.optString("mime_type", "");
+        return (mime.startsWith("image/") && f.optBoolean("has_preview_image", false) && !mime.contains("gif")) || mime.startsWith("video/");
+    }
+
+    /** Message ids of a post's extra-attachment messages. */
+    private ArrayList<Integer> extraMids(String postId) {
+        return ids().extraMids(postId);
     }
 
     /** Telegram names cached files "volume_local.jpg"; an unavailable location means "never download". */
@@ -1182,8 +1253,9 @@ public class MMBackend {
             d.peer = peerFor(did);
             d.id = did;
             if (p.has("id")) {
-                TLRPC.Message m = toMessage(p, c, p.optJSONObject("__batch"));
-                b.messages.add(m);
+                ArrayList<TLRPC.Message> ms = toMessages(p, c, p.optJSONObject("__batch"));
+                b.messages.addAll(ms);
+                TLRPC.Message m = ms.get(ms.size() - 1);
                 d.top_message = m.id;
                 d.last_message_date = m.date;
             } else {
@@ -1383,11 +1455,12 @@ public class MMBackend {
         messages_Messages_Builder builder = new messages_Messages_Builder(did < 0);
         HashSet<Integer> seen = new HashSet<>();
         for (JSONObject p : posts) {
-            TLRPC.Message m = toMessage(p, channel, p.optJSONObject("__batch"));
-            if ((maxId > 0 && m.id >= maxId) || (minId > 0 && m.id <= minId) || !seen.add(m.id)) {
-                continue;
+            for (TLRPC.Message m : toMessages(p, channel, p.optJSONObject("__batch"))) {
+                if ((maxId > 0 && m.id >= maxId) || (minId > 0 && m.id <= minId) || !seen.add(m.id)) {
+                    continue;
+                }
+                builder.r.messages.add(m);
             }
-            builder.r.messages.add(m);
         }
         Collections.sort(builder.r.messages, (a, b) -> Integer.compare(b.id, a.id));
         for (String uid : needUsers) {
@@ -1437,7 +1510,7 @@ public class MMBackend {
         }
         ensureUsers(needUsers);
         for (JSONObject[] pc : found) {
-            builder.r.messages.add(toMessage(pc[0], pc[1], null));
+            builder.r.messages.addAll(toMessages(pc[0], pc[1], null));
             if (!isDm(pc[1])) {
                 builder.r.chats.add(toChat(pc[1]));
             }
@@ -1999,22 +2072,24 @@ public class MMBackend {
                     TL_update.TL_updateDeleteChannelMessages u = new TL_update.TL_updateDeleteChannelMessages();
                     u.channel_id = chatId;
                     u.messages.add(mid);
+                    u.messages.addAll(extraMids(p.optString("id")));
                     u.pts = serverPts;
                     u.pts_count = 0;
                     d.other_updates.add(u);
                 }
                 continue;
             }
-            TLRPC.Message m = toMessage(p, c, posts);
-            if (p.optLong("create_at", 0) >= since) {
-                m.unread = !m.out;
-                d.new_messages.add(m);
-            } else {
-                TL_update.TL_updateEditChannelMessage e = new TL_update.TL_updateEditChannelMessage();
-                e.message = m;
-                e.pts = serverPts;
-                e.pts_count = 0;
-                d.other_updates.add(e);
+            for (TLRPC.Message m : toMessages(p, c, posts)) {
+                if (p.optLong("create_at", 0) >= since) {
+                    m.unread = !m.out;
+                    d.new_messages.add(m);
+                } else {
+                    TL_update.TL_updateEditChannelMessage e = new TL_update.TL_updateEditChannelMessage();
+                    e.message = m;
+                    e.pts = serverPts;
+                    e.pts_count = 0;
+                    d.other_updates.add(e);
+                }
             }
         }
         d.pts = serverPts;
@@ -2072,17 +2147,21 @@ public class MMBackend {
                     if (known) {
                         int mid = ids().existingMid(p.optString("id"));
                         d.other_updates.add(deleteUpdate(did, mid));
+                        for (int extra : extraMids(p.optString("id"))) {
+                            d.other_updates.add(deleteUpdate(did, extra));
+                        }
                     }
                     continue;
                 }
-                TLRPC.Message m = toMessage(p, c, (JSONObject) f[2]);
-                if (known) {
-                    if (p.optLong("edit_at", 0) > since || p.optLong("update_at", 0) > since) {
-                        d.other_updates.add(editUpdate(m, did));
+                for (TLRPC.Message m : toMessages(p, c, (JSONObject) f[2])) {
+                    if (known) {
+                        if (p.optLong("edit_at", 0) > since || p.optLong("update_at", 0) > since) {
+                            d.other_updates.add(editUpdate(m, did));
+                        }
+                    } else {
+                        m.unread = !m.out;
+                        d.other_updates.add(newMessageUpdate(m, did));
                     }
-                } else {
-                    m.unread = !m.out;
-                    d.other_updates.add(newMessageUpdate(m, did));
                 }
                 if (did < 0 && chatsAdded.add(-did)) {
                     d.chats.add(toChat(c));
@@ -2301,8 +2380,8 @@ public class MMBackend {
                 }
                 ensureUsers(need);
                 long did = dialogId(channel);
-                TLRPC.Message m = toMessage(post, channel, null);
-                m.unread = !m.out;
+                ArrayList<TLRPC.Message> ms = toMessages(post, channel, null);
+                TLRPC.Message m = ms.get(0);
                 if (!m.out && data.has("mentions")) {
                     String mentions = data.optString("mentions", "");
                     if (mentions.contains(config.userId)) {
@@ -2311,7 +2390,10 @@ public class MMBackend {
                     }
                 }
                 TLRPC.TL_updates u = new TLRPC.TL_updates();
-                u.updates.add(newMessageUpdate(m, did));
+                for (TLRPC.Message mm : ms) {
+                    mm.unread = !mm.out;
+                    u.updates.add(newMessageUpdate(mm, did));
+                }
                 for (String uid : need) {
                     u.users.add(toUser(users.get(uid)));
                 }
@@ -2350,6 +2432,9 @@ public class MMBackend {
                 long did = dialogId(channel);
                 TLRPC.TL_updates u = new TLRPC.TL_updates();
                 u.updates.add(deleteUpdate(did, mid));
+                for (int extra : extraMids(post.optString("id"))) {
+                    u.updates.add(deleteUpdate(did, extra));
+                }
                 pushUpdates(u);
                 break;
             }

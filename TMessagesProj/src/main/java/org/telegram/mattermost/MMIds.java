@@ -9,6 +9,7 @@ import org.telegram.messenger.ApplicationLoader;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HashMap;
 
 /**
@@ -228,12 +229,12 @@ public class MMIds {
             String k = key(did, mid);
             String p = midToPost.get(k);
             if (p != null) {
-                return p;
+                return basePost(p);
             }
             Cursor c = db.rawQuery("SELECT post FROM posts WHERE did = ? AND mid = ?", new String[]{String.valueOf(did), String.valueOf(mid)});
             try {
                 if (c.moveToFirst()) {
-                    p = c.getString(0);
+                    p = basePost(c.getString(0));
                     midToPost.put(k, p);
                     return p;
                 }
@@ -248,7 +249,7 @@ public class MMIds {
         synchronized (this) {
             Cursor c = db.rawQuery("SELECT post FROM posts WHERE did > 0 AND mid = ? LIMIT 1", new String[]{String.valueOf(mid)});
             try {
-                return c.moveToFirst() ? c.getString(0) : null;
+                return c.moveToFirst() ? basePost(c.getString(0)) : null;
             } finally {
                 c.close();
             }
@@ -262,10 +263,32 @@ public class MMIds {
         synchronized (this) {
             Cursor c = db.rawQuery("SELECT post FROM posts WHERE did = ? AND mid <= ? ORDER BY mid DESC LIMIT 1", new String[]{String.valueOf(did), String.valueOf(mid)});
             try {
-                return c.moveToFirst() ? c.getString(0) : null;
+                return c.moveToFirst() ? basePost(c.getString(0)) : null;
             } finally {
                 c.close();
             }
+        }
+    }
+
+    /** Extra attachments of a post are stored as "postId#index"; map them back to the post. */
+    public static String basePost(String key) {
+        int i = key.indexOf('#');
+        return i < 0 ? key : key.substring(0, i);
+    }
+
+    /** Message ids of the extra-attachment messages of a post (empty if none). */
+    public ArrayList<Integer> extraMids(String postId) {
+        synchronized (this) {
+            ArrayList<Integer> r = new ArrayList<>();
+            Cursor c = db.rawQuery("SELECT mid FROM posts WHERE post LIKE ?", new String[]{postId + "#%"});
+            try {
+                while (c.moveToNext()) {
+                    r.add(c.getInt(0));
+                }
+            } finally {
+                c.close();
+            }
+            return r;
         }
     }
 
