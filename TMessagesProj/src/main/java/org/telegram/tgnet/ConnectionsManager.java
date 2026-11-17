@@ -1536,7 +1536,33 @@ public class ConnectionsManager extends BaseController {
     private static int mm_getCurrentTime(int currentAccount) { return (int) (System.currentTimeMillis() / 1000); }
     private static long mm_getCurrentTimeMillis(int currentAccount) { return System.currentTimeMillis(); }
     private static int mm_getTimeDifference(int currentAccount) { return 0; }
-    private static void mm_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass) {  }
+    private static void mm_init(int currentAccount, int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, String installer, String packageId, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection, boolean hasNetwork, int networkType, int performanceClass) {
+        startMmTimer(currentAccount);
+    }
+
+    private static final boolean[] mmTimerStarted = new boolean[UserConfig.MAX_ACCOUNT_COUNT];
+
+    /**
+     * The native network layer used to call onUpdate() once a second, which drives
+     * MessagesController.updateTimerProc (expiring "typing" indicators, flushing read
+     * receipts, online status...). mm-tg replaces that layer, so tick from Java instead.
+     */
+    private static synchronized void startMmTimer(int currentAccount) {
+        if (currentAccount < 0 || currentAccount >= mmTimerStarted.length || mmTimerStarted[currentAccount]) {
+            return;
+        }
+        mmTimerStarted[currentAccount] = true;
+        Runnable[] tick = new Runnable[1];
+        tick[0] = () -> {
+            try {
+                AccountInstance.getInstance(currentAccount).getMessagesController().updateTimerProc();
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+            Utilities.stageQueue.postRunnable(tick[0], 1000);
+        };
+        Utilities.stageQueue.postRunnable(tick[0], 1000);
+    }
     private static int mm_isTestBackend(int currentAccount) { return 0; }
     private static void mm_moveDatacenter(int currentAccount, int datacenterId) {  }
     private static void mm_onHostNameResolved(String host, long address, String ip) {  }

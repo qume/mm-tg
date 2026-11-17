@@ -376,7 +376,15 @@ public class MMBackend {
             TLRPC.TL_messages_dialogFilters r = new TLRPC.TL_messages_dialogFilters();
             return r;
         } else if (req instanceof org.telegram.tgnet.tl.TL_account.updateStatus || req instanceof TLRPC.TL_messages_reorderPinnedDialogs) {
-            return new TLRPC.TL_boolTrue();        } else if (req instanceof TLRPC.TL_messages_createChat) {
+            return new TLRPC.TL_boolTrue();
+        } else if (req instanceof TLRPC.TL_messages_getMessagesViews) {
+            // polled by the once-a-second timer for visible messages; Mattermost has no view counts
+            TLRPC.TL_messages_messageViews r = new TLRPC.TL_messages_messageViews();
+            for (int i = 0; i < ((TLRPC.TL_messages_getMessagesViews) req).id.size(); i++) {
+                r.views.add(new TLRPC.TL_messageViews());
+            }
+            return r;
+        } else if (req instanceof TLRPC.TL_messages_createChat) {
             TLRPC.TL_messages_createChat r = (TLRPC.TL_messages_createChat) req;
             TLRPC.TL_messages_invitedUsers res = new TLRPC.TL_messages_invitedUsers();
             res.updates = createGroup(r.title, r.users);
